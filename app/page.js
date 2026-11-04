@@ -1,4 +1,5 @@
 
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -18,14 +19,14 @@ export default function Home() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
   const [otp, setOtp] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
+  const [signupStep, setSignupStep] = useState("details");
+  const [resendSeconds, setResendSeconds] = useState(0);
 
   const [authError, setAuthError] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [verifyingOtp, setVerifyingOtp] = useState(false);
-  const [resendingOtp, setResendingOtp] = useState(false);
 
   const [files, setFiles] = useState([]);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -57,6 +58,17 @@ export default function Home() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // OTP RESEND COUNTDOWN
+  useEffect(() => {
+    if (resendSeconds <= 0) return;
+
+    const timer = setTimeout(() => {
+      setResendSeconds((seconds) => seconds - 1);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [resendSeconds]);
 
   // LOAD FILES FROM SUPABASE
   async function loadFiles() {
@@ -327,7 +339,7 @@ export default function Home() {
     }
   }
 
-  // LOGIN AND SIGNUP
+  // LOGIN AND SEND SIGNUP OTP
   async function handleAuth(event) {
     event.preventDefault();
 
@@ -337,28 +349,47 @@ export default function Home() {
 
     try {
       if (authMode === "signup") {
-        const { data, error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
+        const response = await fetch("/api/auth/send-otp", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email: email.trim().toLowerCase(),
+          }),
         });
 
-        if (error) throw error;
+        const result = await response.json();
 
-        if (data.session) {
-          setAuthMessage("Account created successfully!");
-        } else {
-          setOtpSent(true);
-          setAuthMessage(
-            "Verification code sent! Please check your email."
+        if (!response.ok) {
+          throw new Error(
+            result.error || "Unable to send verification code."
           );
         }
+
+        setSignupStep("otp");
+        setOtp("");
+        setResendSeconds(60);
+        setAuthMessage(
+          "A six-digit verification code has been sent to your email."
+        );
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
 
-        if (error) throw error;
+        if (error) {
+          if (
+            error.message.toLowerCase().includes("email not confirmed")
+          ) {
+            throw new Error(
+              "This account needs email verification. Please contact support."
+            );
+          }
+
+          throw error;
+        }
       }
     } catch (error) {
       setAuthError(error.message);
@@ -367,68 +398,98 @@ export default function Home() {
     }
   }
 
-  // VERIFY SIGNUP OTP
-  async function verifySignupOtp(event) {
+  // VERIFY OTP AND CREATE ACCOUNT
+  async function handleVerifyOTP(event) {
     event.preventDefault();
 
     setAuthError("");
     setAuthMessage("");
-    setVerifyingOtp(true);
+    setSubmitting(true);
 
     try {
-      const { error } = await supabase.auth.verifyOtp({
-        email: email.trim(),
-        token: otp.trim(),
-        type: "email",
+      const response = await fetch("/api/auth/verify-otp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          otp: otp.trim(),
+          name: fullName.trim(),
+          password,
+        }),
       });
 
-      if (error) throw error;
+      const result = await response.json();
 
-      setOtpSent(false);
-      setOtp("");
-      setPassword("");
+      if (!response.ok) {
+        throw new Error(
+          result.error || "OTP verification failed."
+        );
+      }
 
-      setAuthMessage("Email verified successfully!");
+      const { error: loginError } =
+        await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
 
-      // Supabase authentication state listener
-      // will automatically open the dashboard.
+      if (loginError) {
+        setAuthMessage(
+          "Your account was created. Please sign in using your email and password."
+        );
+        setAuthMode("login");
+        setSignupStep("details");
+        setPassword("");
+        setOtp("");
+        return;
+      }
+
+      setAuthMessage(
+        "Your NEXCLOUD account has been created successfully!"
+      );
     } catch (error) {
       setAuthError(error.message);
     } finally {
-      setVerifyingOtp(false);
+      setSubmitting(false);
     }
   }
 
-  // RESEND SIGNUP OTP
-  async function resendSignupOtp() {
+  // RESEND OTP
+  async function handleResendOTP() {
+    if (resendSeconds > 0 || submitting) return;
+
     setAuthError("");
     setAuthMessage("");
-    setResendingOtp(true);
+    setSubmitting(true);
 
     try {
-      const { error } = await supabase.auth.resend({
-        type: "signup",
-        email: email.trim(),
+      const response = await fetch("/api/auth/send-otp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+        }),
       });
 
-      if (error) throw error;
+      const result = await response.json();
 
+      if (!response.ok) {
+        throw new Error(
+          result.error || "Unable to resend verification code."
+        );
+      }
+
+      setOtp("");
+      setResendSeconds(60);
       setAuthMessage("A new verification code has been sent.");
     } catch (error) {
       setAuthError(error.message);
     } finally {
-      setResendingOtp(false);
+      setSubmitting(false);
     }
-  }
-
-  // BACK TO LOGIN
-  function backToLogin() {
-    setOtpSent(false);
-    setOtp("");
-    setPassword("");
-    setAuthMode("login");
-    setAuthError("");
-    setAuthMessage("");
   }
 
   // LOGOUT
@@ -485,98 +546,64 @@ export default function Home() {
             Your business files. One secure cloud.
           </p>
 
-          {otpSent ? (
-            <>
-              <h2>Verify Your Email</h2>
+          <h2>
+            {authMode === "login"
+              ? "Welcome Back"
+              : signupStep === "otp"
+              ? "Verify Your Email"
+              : "Create Your Account"}
+          </h2>
 
-              <p className="auth-description">
-                Enter the 6-digit verification code sent to{" "}
-                <strong>{email}</strong>.
-              </p>
+          <p className="auth-description">
+            {authMode === "login"
+              ? "Sign in to access your cloud dashboard."
+              : signupStep === "otp"
+              ? "Enter the verification code sent to your email."
+              : "Create an account to get started with NEXCLOUD."}
+          </p>
 
-              <form
-                onSubmit={verifySignupOtp}
-                className="auth-form"
-              >
-                <label>Verification Code</label>
+          <form
+            onSubmit={
+              signupStep === "otp" && authMode === "signup"
+                ? handleVerifyOTP
+                : handleAuth
+            }
+            className="auth-form"
+          >
+            {authMode === "signup" && signupStep === "details" && (
+              <>
+                <label>Full Name</label>
 
                 <input
                   type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  maxLength={6}
-                  placeholder="Enter 6-digit code"
-                  value={otp}
+                  placeholder="Enter your full name"
+                  value={fullName}
                   onChange={(event) =>
-                    setOtp(
-                      event.target.value
-                        .replace(/\D/g, "")
-                        .slice(0, 6)
-                    )
+                    setFullName(event.target.value)
                   }
+                  autoComplete="name"
+                  minLength={2}
                   required
                 />
+              </>
+            )}
 
-                {authError && (
-                  <p className="auth-error">{authError}</p>
-                )}
+            <label>Email Address</label>
 
-                {authMessage && (
-                  <p className="auth-message">{authMessage}</p>
-                )}
+            <input
+              type="email"
+              placeholder="Enter your email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+              readOnly={
+                authMode === "signup" && signupStep === "otp"
+              }
+              required
+            />
 
-                <button
-                  className="primary-button auth-submit"
-                  type="submit"
-                  disabled={verifyingOtp || otp.length !== 6}
-                >
-                  {verifyingOtp ? "Verifying..." : "Verify OTP"}
-                </button>
-
-                <button
-                  type="button"
-                  className="view-button"
-                  onClick={resendSignupOtp}
-                  disabled={resendingOtp}
-                >
-                  {resendingOtp ? "Sending..." : "Resend Code"}
-                </button>
-
-                <button
-                  type="button"
-                  className="view-button"
-                  onClick={backToLogin}
-                >
-                  Back to Sign In
-                </button>
-              </form>
-            </>
-          ) : (
-            <>
-              <h2>
-                {authMode === "login"
-                  ? "Welcome Back"
-                  : "Create Your Account"}
-              </h2>
-
-              <p className="auth-description">
-                {authMode === "login"
-                  ? "Sign in to access your cloud dashboard."
-                  : "Create an account to get started with NEXCLOUD."}
-              </p>
-
-              <form onSubmit={handleAuth} className="auth-form">
-                <label>Email Address</label>
-
-                <input
-                  type="email"
-                  placeholder="Enter your email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  autoComplete="email"
-                  required
-                />
-
+            {!(authMode === "signup" && signupStep === "otp") && (
+              <>
                 <label>Password</label>
 
                 <input
@@ -586,7 +613,7 @@ export default function Home() {
                   onChange={(event) =>
                     setPassword(event.target.value)
                   }
-                  minLength={6}
+                  minLength={authMode === "signup" ? 8 : 6}
                   autoComplete={
                     authMode === "login"
                       ? "current-password"
@@ -594,48 +621,107 @@ export default function Home() {
                   }
                   required
                 />
+              </>
+            )}
 
-                {authError && (
-                  <p className="auth-error">{authError}</p>
-                )}
+            {authMode === "signup" && signupStep === "otp" && (
+              <>
+                <label>Six-Digit Verification Code</label>
 
-                {authMessage && (
-                  <p className="auth-message">{authMessage}</p>
-                )}
+                <input
+                  type="text"
+                  placeholder="Enter your six-digit OTP"
+                  value={otp}
+                  onChange={(event) =>
+                    setOtp(
+                      event.target.value
+                        .replace(/\D/g, "")
+                        .slice(0, 6)
+                    )
+                  }
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  required
+                />
 
-                <button
-                  className="primary-button auth-submit"
-                  type="submit"
-                  disabled={submitting}
-                >
-                  {submitting
-                    ? "Please wait..."
-                    : authMode === "login"
-                    ? "Sign In"
-                    : "Create Account"}
-                </button>
-              </form>
-
-              <p className="auth-switch">
-                {authMode === "login"
-                  ? "Don't have an account?"
-                  : "Already have an account?"}
+                <p className="auth-description">
+                  Check your inbox and spam folder for the NEXCLOUD
+                  verification code.
+                </p>
 
                 <button
                   type="button"
+                  className="view-button"
+                  onClick={handleResendOTP}
+                  disabled={resendSeconds > 0 || submitting}
+                >
+                  {resendSeconds > 0
+                    ? `Resend code in ${resendSeconds}s`
+                    : "Resend verification code"}
+                </button>
+
+                <button
+                  type="button"
+                  className="view-button"
                   onClick={() => {
-                    setAuthMode(
-                      authMode === "login" ? "signup" : "login"
-                    );
+                    setSignupStep("details");
+                    setOtp("");
                     setAuthError("");
                     setAuthMessage("");
                   }}
                 >
-                  {authMode === "login" ? "Sign Up" : "Sign In"}
+                  Change registration details
                 </button>
-              </p>
-            </>
-          )}
+              </>
+            )}
+
+            {authError && (
+              <p className="auth-error">{authError}</p>
+            )}
+
+            {authMessage && (
+              <p className="auth-message">{authMessage}</p>
+            )}
+
+            <button
+              className="primary-button auth-submit"
+              type="submit"
+              disabled={submitting}
+            >
+              {submitting
+                ? "Please wait..."
+                : authMode === "login"
+                ? "Sign In"
+                : signupStep === "otp"
+                ? "Verify Email & Create Account"
+                : "Send Verification Code"}
+            </button>
+          </form>
+
+          <p className="auth-switch">
+            {authMode === "login"
+              ? "Don't have an account?"
+              : "Already have an account?"}
+
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(
+                  authMode === "login" ? "signup" : "login"
+                );
+                setSignupStep("details");
+                setFullName("");
+                setOtp("");
+                setPassword("");
+                setResendSeconds(0);
+                setAuthError("");
+                setAuthMessage("");
+              }}
+            >
+              {authMode === "login" ? "Sign Up" : "Sign In"}
+            </button>
+          </p>
         </div>
       </div>
     );
