@@ -1,29 +1,27 @@
 
 import { NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
-import { createClient } from "@supabase/supabase-js";
+import { createAdminSupabase } from "../../../../lib/server/supabase";
 
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SECRET_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
-
-function hashOTP(email, otp) {
-  return createHmac("sha256", process.env.SUPABASE_SECRET_KEY)
+function hashOTP(email, otp, secretKey) {
+  return createHmac("sha256", secretKey)
     .update(`${email}:${otp}`)
     .digest("hex");
 }
 
 export async function POST(request) {
   try {
-    const { email, otp, name, password } = await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON request body." },
+        { status: 400 }
+      );
+    }
+
+    const { email, otp, name, password } = body ?? {};
 
     if (
       typeof email !== "string" ||
@@ -42,6 +40,16 @@ export async function POST(request) {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+    const secretKey = process.env.SUPABASE_SECRET_KEY;
+    if (!secretKey || !process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      console.error("OTP verification configuration is missing Supabase server credentials.");
+      return NextResponse.json(
+        { error: "Account verification is not configured on the server." },
+        { status: 503 }
+      );
+    }
+
+    const supabase = createAdminSupabase();
 
     const { data: record, error: lookupError } = await supabase
       .from("email_otps")
@@ -84,7 +92,7 @@ export async function POST(request) {
 
     const expectedHash = Buffer.from(record.otp_hash, "hex");
     const suppliedHash = Buffer.from(
-      hashOTP(normalizedEmail, otp),
+      hashOTP(normalizedEmail, otp, secretKey),
       "hex"
     );
 

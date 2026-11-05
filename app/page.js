@@ -2,10 +2,11 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { X, FileText, LogOut, Cloud } from "lucide-react";
 
 import supabase from "../config/supabaseClient";
+import { apiRequest } from "../lib/api-client";
 import Sidebar from "../components/Sidebar";
 import Navbar from "../components/Navbar";
 import DashboardStats from "../components/DashboardStats";
@@ -29,8 +30,10 @@ export default function Home() {
   const [submitting, setSubmitting] = useState(false);
 
   const [files, setFiles] = useState([]);
+  const [stats, setStats] = useState(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
+  const [statsError, setStatsError] = useState("");
 
   const [searchQuery, setSearchQuery] = useState("");
   const [previewFile, setPreviewFile] = useState(null);
@@ -71,17 +74,23 @@ export default function Home() {
   }, [resendSeconds]);
 
   // LOAD FILES FROM SUPABASE
-  async function loadFiles() {
+  const loadStats = useCallback(async () => {
+    try {
+      const result = await apiRequest("/api/dashboard/stats");
+      setStats(result);
+      setStatsError("");
+    } catch (error) {
+      console.error("Dashboard stats error:", error);
+      setStatsError(error.message || "Unable to load dashboard statistics.");
+    }
+  }, []);
+
+  const loadFiles = useCallback(async () => {
     setFilesLoading(true);
     setFilesError("");
 
     try {
-      const { data, error } = await supabase
-        .from("files")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (error) throw error;
+      const { files: data } = await apiRequest("/api/files");
 
       const formattedFiles = data.map((file) => {
         const mime = file.mime_type || "";
@@ -116,22 +125,29 @@ export default function Home() {
       });
 
       setFiles(formattedFiles);
+      await loadStats();
     } catch (error) {
       console.error("File loading error:", error);
       setFilesError(error.message || "Unable to load files.");
     } finally {
       setFilesLoading(false);
     }
-  }
+  }, [loadStats]);
 
   // LOAD FILES WHEN LOGGED IN
   useEffect(() => {
-    if (session) {
-      loadFiles();
-    } else {
-      setFiles([]);
-    }
-  }, [session]);
+    const timer = setTimeout(() => {
+      if (session) {
+        loadFiles();
+      } else {
+        setFiles([]);
+        setStats(null);
+        setStatsError("");
+      }
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [session, loadFiles]);
 
   // DOWNLOAD FILE
   async function handleDownload(file) {
@@ -140,20 +156,12 @@ export default function Home() {
         throw new Error("File storage path is missing.");
       }
 
-      const { data, error } = await supabase.storage
-        .from("nextcloud-files")
-        .createSignedUrl(file.storage_path, 60, {
-          download: file.name,
-        });
-
-      if (error) throw error;
-
-      if (!data?.signedUrl) {
-        throw new Error("Could not generate a download link.");
-      }
+      const { url } = await apiRequest(
+        `/api/files/${encodeURIComponent(file.id)}/url?download=true`
+      );
 
       const link = document.createElement("a");
-      link.href = data.signedUrl;
+      link.href = url;
       link.download = file.name;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
@@ -179,17 +187,10 @@ export default function Home() {
         throw new Error("File storage path is missing.");
       }
 
-      const { data, error } = await supabase.storage
-        .from("nextcloud-files")
-        .createSignedUrl(file.storage_path, 300);
-
-      if (error) throw error;
-
-      if (!data?.signedUrl) {
-        throw new Error("Could not generate preview link.");
-      }
-
-      setPreviewUrl(data.signedUrl);
+      const { url } = await apiRequest(
+        `/api/files/${encodeURIComponent(file.id)}/url`
+      );
+      setPreviewUrl(url);
     } catch (error) {
       console.error("Preview error:", error);
       setPreviewError(
@@ -211,78 +212,13 @@ export default function Home() {
   // RENAME FILE PERMANENTLY
   async function renameFile(file, newName) {
     try {
-      const cleanName = newName.trim().replace(/[\\/]/g, "-");
-
+      const cleanName = newName.trim();
       if (!cleanName || cleanName === file.name) return;
 
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError) throw userError;
-      if (!user) throw new Error("Please log in again.");
-
-      const newPath = `${user.id}/${crypto.randomUUID()}-${cleanName}`;
-
-      const { error: copyError } = await supabase.storage
-        .from("nextcloud-files")
-        .copy(file.storage_path, newPath);
-
-      if (copyError) throw copyError;
-
-      const folder = user.id;
-
-      const { data: objects, error: listError } =
-        await supabase.storage
-          .from("nextcloud-files")
-          .list(folder);
-
-      if (listError) {
-        await supabase.storage
-          .from("nextcloud-files")
-          .remove([newPath]);
-
-        throw listError;
-      }
-
-      const newFileName = newPath.split("/").pop();
-
-      if (!objects?.some((item) => item.name === newFileName)) {
-        await supabase.storage
-          .from("nextcloud-files")
-          .remove([newPath]);
-
-        throw new Error("New file could not be verified in Storage.");
-      }
-
-      const { data: updatedRows, error: updateError } =
-        await supabase
-          .from("files")
-          .update({
-            name: cleanName,
-            storage_path: newPath,
-          })
-          .eq("id", file.id)
-          .eq("user_id", user.id)
-          .select("id");
-
-      if (updateError || !updatedRows?.length) {
-        await supabase.storage
-          .from("nextcloud-files")
-          .remove([newPath]);
-
-        throw updateError || new Error("Database record was not updated.");
-      }
-
-      const { error: removeError } = await supabase.storage
-        .from("nextcloud-files")
-        .remove([file.storage_path]);
-
-      if (removeError) {
-        console.error("Old file cleanup failed:", removeError);
-      }
-
+      await apiRequest(`/api/files/${encodeURIComponent(file.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: cleanName }),
+      });
       await loadFiles();
       alert("File renamed successfully!");
     } catch (error) {
@@ -300,32 +236,9 @@ export default function Home() {
     if (!confirmed) return;
 
     try {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError) throw userError;
-      if (!user) throw new Error("Please log in again.");
-
-      const { error: storageError } = await supabase.storage
-        .from("nextcloud-files")
-        .remove([file.storage_path]);
-
-      if (storageError) throw storageError;
-
-      const { error: databaseError } = await supabase
-        .from("files")
-        .delete()
-        .eq("id", file.id)
-        .eq("user_id", user.id);
-
-      if (databaseError) {
-        throw new Error(
-          "Storage file was deleted, but its database record could not be deleted: " +
-            databaseError.message
-        );
-      }
+      await apiRequest(`/api/files/${encodeURIComponent(file.id)}`, {
+        method: "DELETE",
+      });
 
       if (previewFile?.id === file.id) {
         closePreview();
@@ -756,7 +669,7 @@ export default function Home() {
             </button>
           </div>
 
-          <DashboardStats />
+          <DashboardStats stats={stats} error={statsError} />
 
           <UploadBox onUploadComplete={loadFiles} />
 

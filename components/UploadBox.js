@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import supabase from "../config/supabaseClient";
+import { apiRequest } from "../lib/api-client";
 
 export default function UploadBox({ onUploadComplete }) {
   const inputRef = useRef(null);
@@ -43,17 +44,6 @@ export default function UploadBox({ onUploadComplete }) {
     setProgress((previous) => ({ ...previous, [id]: 0 }));
 
     try {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError) throw userError;
-
-      if (!user) {
-        throw new Error("Please log in before uploading files.");
-      }
-
       if (file.size > 50 * 1024 * 1024) {
         throw new Error("File size cannot exceed 50 MB.");
       }
@@ -75,45 +65,37 @@ export default function UploadBox({ onUploadComplete }) {
         throw new Error("This file type is not allowed.");
       }
 
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-
-      const filePath = `${user.id}/${crypto.randomUUID()}-${safeName}`;
+      const { path, token } = await apiRequest("/api/files/upload-url", {
+        method: "POST",
+        body: JSON.stringify({
+          name: file.name,
+          mimeType: file.type,
+          size: file.size,
+        }),
+      });
 
       setProgress((previous) => ({ ...previous, [id]: 30 }));
 
       const { error: storageError } = await supabase.storage
         .from("nextcloud-files")
-        .upload(filePath, file, {
-          contentType: file.type,
-          upsert: false,
-        });
+        .uploadToSignedUrl(path, token, file, { contentType: file.type });
 
       if (storageError) {
-  console.error("STORAGE UPLOAD ERROR:", storageError);
-  throw storageError;
-}
+        console.error("STORAGE UPLOAD ERROR:", storageError);
+        throw storageError;
+      }
 
       setProgress((previous) => ({ ...previous, [id]: 75 }));
 
-      const { error: databaseError } = await supabase
-        .from("files")
-        .insert({
-          user_id: user.id,
+      await apiRequest("/api/files", {
+        method: "POST",
+        body: JSON.stringify({
           name: file.name,
-          storage_path: filePath,
-          mime_type: file.type,
+          storagePath: path,
+          mimeType: file.type,
           size: file.size,
-        });
-
-     if (databaseError) {
-  console.error("DATABASE INSERT ERROR:", databaseError);
-
-  await supabase.storage
-    .from("nextcloud-files")
-    .remove([filePath]);
-
-  throw databaseError;
-}
+        }),
+      });
 
       setProgress((previous) => ({ ...previous, [id]: 100 }));
 
