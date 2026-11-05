@@ -4,27 +4,51 @@ import nodemailer from "nodemailer";
 import { randomInt, createHmac } from "crypto";
 import { createClient } from "@supabase/supabase-js";
 
-
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SECRET_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  }
-);
-
-function hashOTP(email, otp) {
-  return createHmac("sha256", process.env.SUPABASE_SECRET_KEY)
+function hashOTP(email, otp, secretKey) {
+  return createHmac("sha256", secretKey)
     .update(`${email}:${otp}`)
     .digest("hex");
 }
 
 export async function POST(request) {
   try {
+    const requiredEnvVars = [
+      "NEXT_PUBLIC_SUPABASE_URL",
+      "SUPABASE_SECRET_KEY",
+      "GMAIL_USER",
+      "GMAIL_APP_PASSWORD",
+    ];
+    const missingEnvVars = requiredEnvVars.filter(
+      (name) => !process.env[name]?.trim()
+    );
+
+    if (missingEnvVars.length > 0) {
+      console.error("Send OTP configuration error:", {
+        missingEnvVars,
+      });
+
+      return NextResponse.json(
+        {
+          error: `OTP email is not configured on the server. Missing: ${missingEnvVars.join(
+            ", "
+          )}.`,
+        },
+        { status: 503 }
+      );
+    }
+
+    const secretKey = process.env.SUPABASE_SECRET_KEY;
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      secretKey,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      }
+    );
+
     const { email } = await request.json();
 
     if (
@@ -61,7 +85,7 @@ export async function POST(request) {
     // Generate a secure six-digit OTP.
     const otp = randomInt(100000, 1000000).toString();
 
-    const otpHash = hashOTP(normalizedEmail, otp);
+    const otpHash = hashOTP(normalizedEmail, otp, secretKey);
 
     const expiresAt = new Date(
       Date.now() + 5 * 60 * 1000
@@ -84,14 +108,14 @@ export async function POST(request) {
       port: 465,
       secure: true,
       auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_APP_PASSWORD,
+        user: process.env.GMAIL_USER.trim(),
+        pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, ""),
       },
     });
 
     try {
       await transporter.sendMail({
-        from: `"NEXCLOUD Systems" <${process.env.GMAIL_USER}>`,
+        from: `"NEXCLOUD Systems" <${process.env.GMAIL_USER.trim()}>`,
         to: normalizedEmail,
         subject: "Your NEXCLOUD Verification Code",
         text: `Your NEXCLOUD OTP is ${otp}. It expires in 5 minutes.`,
@@ -107,10 +131,17 @@ export async function POST(request) {
         `,
       });
     } catch (emailError) {
-      await supabase
+      const { error: deleteError } = await supabase
         .from("email_otps")
         .delete()
         .eq("email", normalizedEmail);
+
+      if (deleteError) {
+        console.error(
+          "Failed to remove OTP after email delivery failed:",
+          deleteError
+        );
+      }
 
       throw emailError;
     }
@@ -123,8 +154,37 @@ export async function POST(request) {
   } catch (error) {
     console.error("Send OTP error:", error);
 
+    const errorCode = error?.code;
+    const errorMessage =
+      typeof error?.message === "string" ? error.message.toLowerCase() : "";
+    let responseMessage = "Unable to send OTP. Please try again.";
+
+    if (errorCode === "EAUTH" || error?.responseCode === 535) {
+      responseMessage =
+        "The email provider rejected its credentials. Check GMAIL_USER and GMAIL_APP_PASSWORD in Vercel.";
+    } else if (
+      ["ENOTFOUND", "EAI_AGAIN", "ECONNECTION", "ETIMEDOUT"].includes(
+        errorCode
+      )
+    ) {
+      responseMessage =
+        "Unable to connect to Gmail. Please try again later or check the email service configuration.";
+    } else if (
+      ["42P01", "PGRST205"].includes(errorCode) ||
+      errorMessage.includes("email_otps")
+    ) {
+      responseMessage =
+        "OTP storage is unavailable. Check that the email_otps table exists in Supabase.";
+    } else if (
+      errorMessage.includes("invalid api key") ||
+      errorMessage.includes("invalid jwt")
+    ) {
+      responseMessage =
+        "Supabase rejected the server credentials. Check SUPABASE_SECRET_KEY in Vercel.";
+    }
+
     return NextResponse.json(
-      { error: "Unable to send OTP. Please try again." },
+      { error: responseMessage },
       { status: 500 }
     );
   }
